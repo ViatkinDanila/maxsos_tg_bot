@@ -17,6 +17,7 @@ import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 import tg.bot.maxsostgbot.config.BotConfig;
 import tg.bot.maxsostgbot.repo.model.TgBotUser;
+import tg.bot.maxsostgbot.service.BroadcastMessageService;
 import tg.bot.maxsostgbot.service.TgBotUserService;
 import tg.bot.maxsostgbot.service.impl.TgBotUserServiceImpl;
 import tg.bot.maxsostgbot.util.Utils;
@@ -33,14 +34,17 @@ public class TelegramBotController extends TelegramLongPollingBot {
 
     private final BotConfig botConfig;
     private final TgBotUserService userService;
+    private final BroadcastMessageService bms;
     //Хранятся названия кнопок для комманды /unsub
     private Map<String, Map<Long, String>> inlineKeyBoardButtonOffsets;
 
 
     public TelegramBotController(@Autowired BotConfig botConfig,
-                                 @Autowired TgBotUserServiceImpl userService) {
+                                 @Autowired TgBotUserServiceImpl userService,
+                                 @Autowired  BroadcastMessageService bms) {
         this.botConfig = botConfig;
         this.userService = userService;
+        this.bms = bms;
     }
 
     @PostConstruct
@@ -107,7 +111,9 @@ public class TelegramBotController extends TelegramLongPollingBot {
                                         new BotCommand("info", "Информация о пользователе (/info @username)"),
                                         new BotCommand("block", "Заблокировать пользователя (/block @username)"),
                                         new BotCommand("unblock", "Разблокировать пользователя (/unblock @username)"),
-                                        new BotCommand("promote", "Сделать пользователя админом(/promote @username)"),
+                                        new BotCommand("message", "Изменить сообщение авторассылки"),
+                                        new BotCommand("interval", "Изменить интервал авторассылки"),
+                                        new BotCommand("stop", "Остановить авторассылку"),
                                         new BotCommand("broadcast", "Разослать оповещение(/broadcast 'сообщение')")
                                 );
 
@@ -188,57 +194,129 @@ public class TelegramBotController extends TelegramLongPollingBot {
                         break;
                     }
                     case "/broadcast": {
-                        String broadcastMessage = Utils.getBroadcastMessage(update.getMessage().getText());
-                        if (broadcastMessage.isEmpty()) {
-                            message.setText(ADMIN_FORGET_TYPE_BROADCAST_TEXT);
-                        } else {
-                            Stream<Long> subscriberChatIds = userService.findAll()
-                                    .filter(tgBotUser -> TgBotUser.Role.SUBSCRIBER.equals(tgBotUser.getRole())
-                                            && OffsetDateTime.now().isAfter(tgBotUser.getResumptionNotificationTime())
-                                            && !TgBotUser.Status.BLOCKED.equals(tgBotUser.getStatus()))
-                                    .map(tgBotUser -> {
-                                        try {
-                                            sendMessage(tgBotUser.getChatId(), broadcastMessage);
-                                        } catch (TelegramApiException e) {}
-                                        return tgBotUser.getChatId();
-                                    });
-                            message.setText(String.format(BROADCAST_SUCCESSFUL, subscriberChatIds.count()));
-                        }
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                            if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                String broadcastMessage = Utils.getBroadcastMessage(command, update.getMessage().getText());
+                                if (broadcastMessage.isEmpty()) {
+                                    message.setText(String.format(ADMIN_FORGET_TYPE_BROADCAST_TEXT, command));
+                                } else {
+                                    Stream<Long> subscriberChatIds = userService.findAll()
+                                            .filter(tgBotUser -> TgBotUser.Role.SUBSCRIBER.equals(tgBotUser.getRole())
+                                                    && OffsetDateTime.now().isAfter(tgBotUser.getResumptionNotificationTime())
+                                                    && !TgBotUser.Status.BLOCKED.equals(tgBotUser.getStatus()))
+                                            .map(tgBotUser -> {
+                                                try {
+                                                    sendMessage(tgBotUser.getChatId(), broadcastMessage);
+                                                } catch (TelegramApiException e) {}
+                                                return tgBotUser.getChatId();
+                                            });
+                                    message.setText(String.format(BROADCAST_SUCCESSFUL, subscriberChatIds.count()));
+                                }
+                            } else {
+                                message.setText(COMMAND_NOT_ALLOWED);
+                            }
+                                },
+                                () -> message.setText(START_COMMAND_MISSING));
+
                         execute(message);
                         break;
                     }
-                    case "/block": {
-                        tgBotUserOptional.ifPresentOrElse(tgBotUser -> {
-                                    if (TgBotUser.Role.ADMIN.equals(tgBotUser.getRole())) {
-                                        Optional<String> userName = Utils.extractUsername(update.getMessage().getText());
-                                        if (userName.isPresent()) {
-                                            String responseMessage = userService.blockUser(userName.get());
-                                            message.setText(String.format(responseMessage, userName.get()));
+                    case "/message": {
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                                    if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                        String newAutoBroadcastMessage = Utils.getBroadcastMessage(command, update.getMessage().getText());
+                                        if (newAutoBroadcastMessage.isEmpty()) {
+                                            message.setText(String.format(ADMIN_FORGET_TYPE_BROADCAST_TEXT, command));
                                         } else {
-                                            message.setText(String.format(ADMIN_FORGET_TYPE_USERNAME, command));
+                                            bms.updateMessage(newAutoBroadcastMessage);
+                                            message.setText(AUTOBROADCAST_MESSAGE_CHANGED);
                                         }
                                     } else {
-                                        message.setText(tgBotUser.toString());
+                                        message.setText(COMMAND_NOT_ALLOWED);
                                     }
-                        },
+                                },
                                 () -> message.setText(START_COMMAND_MISSING));
                         execute(message);
                         break;
                     }
-                    case "/unblock": {
-                        tgBotUserOptional.ifPresentOrElse(tgBotUser -> {
-                                    if (TgBotUser.Role.ADMIN.equals(tgBotUser.getRole())) {
-                                        Optional<String> userName = Utils.extractUsername(update.getMessage().getText());
-                                        if (userName.isPresent()) {
-                                            String responseMessage = userService.unblockUser(userName.get());
-                                            message.setText(String.format(responseMessage, userName.get()));
-                                        } else {
-                                            message.setText(String.format(ADMIN_FORGET_TYPE_USERNAME, command));
+                    case "/time": {
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                                    if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                        try {
+                                            Long newIntervalInMillis = Utils.getMillisFromUserMessage(command, update.getMessage().getText());
+                                            bms.updateTime(newIntervalInMillis);
+                                            message.setText(AUTOBROADCAST_INTERVAL_CHANGED);
+                                        } catch (NumberFormatException e) {
+                                            message.setText(ADMIN_TYPE_WRONG_INTERVAL_NUMBER);
                                         }
                                     } else {
-                                        message.setText(tgBotUser.toString());
+                                        message.setText(COMMAND_NOT_ALLOWED);
                                     }
-                        },
+                                },
+                                () -> message.setText(START_COMMAND_MISSING));
+                        execute(message);
+                        break;
+                    }
+                    case "/stop": {
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                                    if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                        bms.deactivateAutoBroadcast();
+                                        message.setText(AUTOBROADCAST_IS_STOPPED);
+                                    } else {
+                                        message.setText(COMMAND_NOT_ALLOWED);
+                                    }
+                                },
+                                () -> message.setText(START_COMMAND_MISSING));
+                        execute(message);
+                        break;
+                    }
+                    case "/block": {
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                                    if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                        tgBotUserOptional.ifPresentOrElse(tgBotUser -> {
+                                                    if (TgBotUser.Role.ADMIN.equals(tgBotUser.getRole())) {
+                                                        Optional<String> userName = Utils.extractUsername(update.getMessage().getText());
+                                                        if (userName.isPresent()) {
+                                                            String responseMessage = userService.blockUser(userName.get());
+                                                            message.setText(String.format(responseMessage, userName.get()));
+                                                        } else {
+                                                            message.setText(String.format(ADMIN_FORGET_TYPE_USERNAME, command));
+                                                        }
+                                                    } else {
+                                                        message.setText(COMMAND_NOT_ALLOWED);
+                                                    }
+                                                },
+                                                () -> message.setText(START_COMMAND_MISSING));
+                                    } else {
+                                        message.setText(COMMAND_NOT_ALLOWED);
+                                    }
+                                },
+                                () -> message.setText(START_COMMAND_MISSING));
+
+                        execute(message);
+                        break;
+                    }
+                    case "/unblock": {
+                        tgBotUserOptional.ifPresentOrElse(tgBotUser1 -> {
+                                    if(TgBotUser.Role.ADMIN.equals(tgBotUser1.getRole())) {
+                                        tgBotUserOptional.ifPresentOrElse(tgBotUser -> {
+                                                    if (TgBotUser.Role.ADMIN.equals(tgBotUser.getRole())) {
+                                                        Optional<String> userName = Utils.extractUsername(update.getMessage().getText());
+                                                        if (userName.isPresent()) {
+                                                            String responseMessage = userService.unblockUser(userName.get());
+                                                            message.setText(String.format(responseMessage, userName.get()));
+                                                        } else {
+                                                            message.setText(String.format(ADMIN_FORGET_TYPE_USERNAME, command));
+                                                        }
+                                                    } else {
+                                                        message.setText(tgBotUser.toString());
+                                                    }
+                                                },
+                                                () -> message.setText(START_COMMAND_MISSING));
+                                    } else {
+                                        message.setText(COMMAND_NOT_ALLOWED);
+                                    }
+                                },
                                 () -> message.setText(START_COMMAND_MISSING));
                         execute(message);
                         break;
@@ -274,7 +352,7 @@ public class TelegramBotController extends TelegramLongPollingBot {
         }
     }
 
-    private void sendMessage(long chatId, String textToSend) throws TelegramApiException {
+    public void sendMessage(long chatId, String textToSend) throws TelegramApiException {
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
         message.setText(textToSend);
